@@ -1,0 +1,33 @@
+﻿<UserControl x:Class="POS_UI.View.NewOrderAlertPopup"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+             Height="120" Width="600" Background="#FAFAFA">
+    <StackPanel>
+        <!-- Main Alert -->
+        <Border Background="#6FC08F" CornerRadius="18" Padding="32,18" Margin="0,8,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="Hey Cashier" Foreground="White" FontSize="20"/>
+                    <TextBlock Text="New Order Alert" Foreground="White" FontSize="28" FontWeight="Bold" Margin="0,6,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="View"
+                        Background="White"
+                        Foreground="#00B200"
+                        FontWeight="Bold"
+                        FontSize="22"
+                        Padding="18,6"
+                        Width="120"
+                        Height="48"
+                        Margin="32,0,0,0"
+                        BorderThickness="0"
+                        BorderBrush="Transparent"
+                        Click="ViewOrderDetails_Click"/>
+            </Grid>
+        </Border>
+    </StackPanel>
+</UserControl> 
