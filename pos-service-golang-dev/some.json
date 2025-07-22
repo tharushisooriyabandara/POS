@@ -1,0 +1,16 @@
+[
+    {
+        "item_id": 1,
+        "title": "Modifier 1",
+        "selected_items": [
+            {
+                "item_id": 1,
+                "title": "Modifier Item 1",
+                "quantity": 1,
+                "price_per_item": "1000.00",
+                "display_price": "10.00"
+            }
+        ],
+        "removed_items": []
+    }
+]

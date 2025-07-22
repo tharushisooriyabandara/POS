@@ -1,0 +1,185 @@
+name: Deploy POS-SERVICE-GOLANG
+
+on:
+  push:
+    branches:
+      - dev
+      - prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_NAME: "pos-service-golang"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set Environment Variables
+        run: |
+          if [[ $GITHUB_REF == "refs/heads/prod" ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "EC2_USER=${{ secrets.PROD_AWS_EC2_USER}}" >> $GITHUB_ENV
+            echo "EC2_INSTANCE_ID=${{ secrets.PROD_AWS_EC2_INSTANCE_ID }}" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "EC2_USER=${{ secrets.DEV_AWS_EC2_USER }}" >> $GITHUB_ENV
+            echo "EC2_INSTANCE_ID=${{ secrets.DEV_AWS_EC2_INSTANCE_ID }}" >> $GITHUB_ENV
+          fi
+
+      - name: Configure AWS CLI
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set default.region ${{ secrets.AWS_REGION }}
+
+      - name: Get EC2 Public IP and Security Group ID
+        run: |
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids ${{ env.EC2_INSTANCE_ID }} --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          echo "EC2_PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          SECURITY_GROUP_ID=$(aws ec2 describe-instances --instance-ids ${{ env.EC2_INSTANCE_ID }} --query "Reservations[].Instances[].SecurityGroups[0].GroupId" --output text)
+          echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_ENV
+
+      - name: Allow SSH access from GitHub Actions runner IP
+        run: |
+          RUNNER_IP=$(curl -s http://checkip.amazonaws.com)
+          aws ec2 authorize-security-group-ingress --group-id ${{ env.SECURITY_GROUP_ID }} --protocol tcp --port 22 --cidr $RUNNER_IP/32
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+
+      - name: Install Supervisor on EC2
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+
+          # Update package list and install Supervisor
+          sudo apt-get update
+          sudo apt-get install -y supervisor
+
+          # Ensure Supervisor is enabled and running
+          sudo systemctl enable supervisor
+          sudo systemctl start supervisor
+          EOF
+
+      - name: Prepare EC2 Deployment Directory
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+
+          # Define directories
+          PROJECT_BASE_DIR="/var/www/github/${{ env.PROJECT_NAME }}"
+          RELEASES_DIR="/var/www/github/${{ env.PROJECT_NAME }}/releases"
+
+          # Create project base and releases directories if not exist
+          if [ ! -d "$PROJECT_BASE_DIR" ]; then
+            sudo mkdir -p "$PROJECT_BASE_DIR"
+          fi
+          if [ ! -d "$RELEASES_DIR" ]; then
+            sudo mkdir -p "$RELEASES_DIR"
+          fi
+
+          sudo chown -R $USER:$USER $PROJECT_BASE_DIR
+          EOF
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Download Go Dependencies
+        run: |
+          go mod download
+
+      - name: Build Go Binary for aarch64
+        run: |
+          GOOS=linux GOARCH=arm64 go build -o ${{ env.PROJECT_NAME }} ./cmd/main.go
+          chmod +x ${{ env.PROJECT_NAME }}
+
+      - name: Archive Previous Binary
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+          PROJECT_BASE_DIR="/var/www/github/${{ env.PROJECT_NAME }}"
+          RELEASES_DIR="/var/www/github/${{ env.PROJECT_NAME }}/releases"
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+
+          # Check if the current binary exists and move it to releases with timestamp
+          if [ -f "$PROJECT_BASE_DIR/${{ env.PROJECT_NAME }}" ]; then
+            mv "$PROJECT_BASE_DIR/${{ env.PROJECT_NAME }}" "$RELEASES_DIR/${{ env.PROJECT_NAME }}-$TIMESTAMP"
+            echo "Moved previous binary to $RELEASES_DIR/${{ env.PROJECT_NAME }}-$TIMESTAMP"
+          fi
+          EOF
+
+      - name: Rsync Binary and Scripts
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          rsync -avz --delete \
+            --include "${{ env.PROJECT_NAME }}" \
+            --include "scripts/" \
+            --include "scripts/fetch_env.sh" \
+            --exclude "*" \
+            ./ ${{ env.EC2_USER }}@${{ env.EC2_IP }}:/var/www/github/${{ env.PROJECT_NAME }}
+
+      - name: Set Permissions for Binary and Fetch Script
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+          chmod +x /var/www/github/${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}
+          chmod +x /var/www/github/${{ env.PROJECT_NAME }}/scripts/fetch_env.sh
+          EOF
+
+      - name: Fetch Environment Variables from AWS Parameter Store
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+          export ENVIRONMENT="${{ env.ENVIRONMENT }}"
+          bash /var/www/github/${{ env.PROJECT_NAME }}/scripts/fetch_env.sh
+          EOF
+
+      - name: Deploy and Restart Service with Supervisor
+        env:
+          EC2_IP: ${{ env.EC2_PUBLIC_IP }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_IP }} << 'EOF'
+          set -e
+
+          # Navigate to the deployment directory
+          cd /var/www/github/${{ env.PROJECT_NAME }}
+
+          # Set Supervisor configuration file based on environment
+          if [ "${{ env.ENVIRONMENT }}" == "prod" ]; then
+            SUPERVISOR_CONF="/etc/supervisor/conf.d/prod-pos-service-golang.conf"
+          else
+            SUPERVISOR_CONF="/etc/supervisor/conf.d/dev-pos-service-golang.conf"
+          fi
+
+          # Create Supervisor configuration file
+          echo "[program:${{ env.PROJECT_NAME }}]
+          command=${PWD}/${{ env.PROJECT_NAME }}
+          directory=${PWD}
+          autostart=true
+          autorestart=true
+          stderr_logfile=/var/log/${{ env.PROJECT_NAME }}.err.log
+          stdout_logfile=/var/log/${{ env.PROJECT_NAME }}.out.log
+          environment=PATH=\"/usr/local/go/bin:${PATH}\"" | sudo tee "$SUPERVISOR_CONF"
+
+          # Reload Supervisor and restart the service
+          sudo supervisorctl reread
+          sudo supervisorctl update
+          sudo supervisorctl restart ${{ env.PROJECT_NAME }} || true
+          EOF
